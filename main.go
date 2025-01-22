@@ -59,67 +59,68 @@ func main() {
 	// CORS Middleware
 	r.Use(cors.Default()) // This will allow all origins; configure as per your requirement
 
-	// Fetch all applications with documents
-	r.GET("/applications", func(c *gin.Context) {
-		var applications []Application
-		rows, err := db.Query("SELECT id, name FROM applications")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch applications"})
-			return
-		}
-		defer rows.Close()
-	
-		for rows.Next() {
-			var app Application
-			if err := rows.Scan(&app.ID, &app.Name); err != nil {
-				log.Printf("Error scanning application: %v", err)
-				continue
-			}
-	
-			// Fetch documents for the application
-			docRows, err := db.Query("SELECT id, name FROM documents WHERE application_id = ?", app.ID)
-			if err != nil {
-				log.Printf("Error fetching documents for application %d: %v", app.ID, err)
-				continue
-			}
-			defer docRows.Close()
-	
-			// Reset the documents slice for each application
-			app.Documents = []Document{} // Ensure it's empty at the start
-	
-			for docRows.Next() {
-				var doc Document
-				if err := docRows.Scan(&doc.ID, &doc.Name); err != nil {
-					log.Printf("Error scanning document: %v", err)
-					continue
-				}
-				app.Documents = append(app.Documents, doc)
-			}
-	
-			// Add the application, even if no documents are found
-			applications = append(applications, app)
-		}
-	
-		// Return the applications with an empty document array if no documents are found
-		c.JSON(http.StatusOK, applications)
-	})
-	
+// Fetch all applications for the specified user_id
+r.GET("/applications", func(c *gin.Context) {
+	userID := c.DefaultQuery("user_id", "0") // Get user_id from query param, default to "0" if not found
+	var applications []Application
+	rows, err := db.Query("SELECT id, name FROM applications WHERE user_id = ?", userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch applications"})
+		return
+	}
+	defer rows.Close()
 
-	// Add a new application
-	r.POST("/applications", func(c *gin.Context) {
+	for rows.Next() {
 		var app Application
-		if err := c.ShouldBindJSON(&app); err != nil || app.Name == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input or missing 'name'"})
-			return
+		if err := rows.Scan(&app.ID, &app.Name); err != nil {
+			log.Printf("Error scanning application: %v", err)
+			continue
 		}
 
-		_, err := db.Exec("INSERT INTO applications (name) VALUES (?)", app.Name)
+		// Fetch documents for the application
+		docRows, err := db.Query("SELECT id, name FROM documents WHERE application_id = ?", app.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add application"})
-			return
+			log.Printf("Error fetching documents for application %d: %v", app.ID, err)
+			continue
 		}
-		c.JSON(http.StatusCreated, gin.H{"message": "Application added"})
-	})
+		defer docRows.Close()
+
+		app.Documents = []Document{} // Reset documents
+
+		for docRows.Next() {
+			var doc Document
+			if err := docRows.Scan(&doc.ID, &doc.Name); err != nil {
+				log.Printf("Error scanning document: %v", err)
+				continue
+			}
+			app.Documents = append(app.Documents, doc)
+		}
+
+		applications = append(applications, app)
+	}
+
+	c.JSON(http.StatusOK, applications)
+})
+
+	
+
+// Add a new application
+r.POST("/applications", func(c *gin.Context) {
+	var app Application
+	userID := c.DefaultQuery("user_id", "0") // Get user_id from query param (if needed)
+	if err := c.ShouldBindJSON(&app); err != nil || app.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input or missing 'name'"})
+		return
+	}
+
+	_, err := db.Exec("INSERT INTO applications (name, user_id) VALUES (?, ?)", app.Name, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add application"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"message": "Application added"})
+})
+
 
 	// Add a new document to an application
 	r.POST("/documents", func(c *gin.Context) {
@@ -138,16 +139,27 @@ func main() {
 		c.JSON(http.StatusCreated, gin.H{"message": "Document added"})
 	})
 
-	// Remove an application
-	r.DELETE("/applications/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		_, err := db.Exec("DELETE FROM applications WHERE id = ?", id)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove application"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"message": "Application removed"})
-	})
+// Remove an application
+r.DELETE("/applications/:id", func(c *gin.Context) {
+	applicationID := c.Param("id")
+	userID := c.DefaultQuery("user_id", "0") // Get user_id from query param (if needed)
+	
+	// Verify if the application belongs to the user
+	var appID int
+	err := db.QueryRow("SELECT id FROM applications WHERE id = ? AND user_id = ?", applicationID, userID).Scan(&appID)
+	if err != nil || appID == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You are not authorized to delete this application"})
+		return
+	}
+	
+	_, err = db.Exec("DELETE FROM applications WHERE id = ?", applicationID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove application"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Application removed"})
+})
+
 
 	// Remove a document
 	r.DELETE("/documents/:id", func(c *gin.Context) {
@@ -159,6 +171,45 @@ func main() {
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "Document removed"})
 	})
+	type User struct {
+		Name  string `json:"name" binding:"required"`
+		Email string `json:"email" binding:"required"`
+		Photo string `json:"photo" binding:"required"`
+	}
+	// Backend handling store-user (Store user in the database)
+r.POST("/store-user", func(c *gin.Context) {
+	var user User
+	if err := c.ShouldBindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid request data"})
+		return
+	}
+
+	// Insert or update user in the database
+	query := `
+		INSERT INTO users (name, email, photo)
+		VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+		name = VALUES(name), photo = VALUES(photo)`
+	
+	_, err := db.Exec(query, user.Name, user.Email, user.Photo)
+	if err != nil {
+		log.Println("Database error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store user data"})
+		return
+	}
+
+	// Fetch the user ID after inserting or updating the user
+	var userID int
+	err = db.QueryRow("SELECT id FROM users WHERE email = ?", user.Email).Scan(&userID)
+	if err != nil {
+		log.Println("Database error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to retrieve user ID"})
+		return
+	}
+
+	// Send back the user_id
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "User data stored successfully", "user_id": userID})
+})
 
 	r.Run(":8080") // Run the server
 }
